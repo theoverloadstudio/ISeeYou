@@ -11,8 +11,8 @@ done
 /usr/bin/plutil -replace CFBundleName -string 'ISeeYou' "$p"
 /usr/bin/plutil -insert CFBundleDisplayName -string 'ISeeYou' "$p"
 /usr/bin/plutil -insert CFBundleIdentifier -string 'com.theoverloadstudio.iseeyou' "$p"
-/usr/bin/plutil -insert CFBundleVersion -string '3' "$p"
-/usr/bin/plutil -insert CFBundleShortVersionString -string '1.2' "$p"
+/usr/bin/plutil -insert CFBundleVersion -string '4' "$p"
+/usr/bin/plutil -insert CFBundleShortVersionString -string '1.3' "$p"
 /usr/bin/plutil -insert LSMinimumSystemVersion -string '13.0' "$p"
 /usr/bin/plutil -insert LSUIElement -bool YES "$p"
 /usr/bin/plutil -insert NSHighResolutionCapable -bool YES "$p"
@@ -31,6 +31,7 @@ if [[ -f "$src/ISeeYou.icns" ]]; then
   /usr/bin/plutil -replace CFBundleIconFile -string ISeeYou "$p"
 fi
 /bin/cp "$src/Waveform.js" "$app/Contents/Resources/Waveform.js"
+/bin/cp "$src/CheckForUpdates.js" "$app/Contents/Resources/CheckForUpdates.js"
 /usr/bin/plutil -lint "$p"
 /usr/bin/codesign --force --sign - "$app"
 /usr/bin/codesign --verify --strict "$app"

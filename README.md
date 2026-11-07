@@ -14,11 +14,14 @@ The script uses macOS's built-in tools and ad hoc signs the resulting app. It re
 
 ## Use
 
-1. Move **ISeeYou.app** to Applications and open it. Look for the waveform icon in the menu bar.
+1. Move **ISeeYou.app** to Applications and open it. Look for the eye icon in the menu bar.
 2. Select a file in Finder and press **⇧⌘E**, or choose **Finder → Services → Show ISeeYou**. For multiple files, use the picker in the inspector to switch between them.
 3. Click **Preview** or press **⌘P** to open the selected file in Quick Look. Use **Copy Details** to copy a text report.
 4. Press **Escape** to close the inspector. Use the menu bar icon to reopen the inspector, open a file, or quit.
+5. Choose **Check for Updates…** from the eye menu to compare your installed version with the latest stable GitHub release. If a newer version is available, **View Release** opens its download page.
 
 If the Finder shortcut is missing or conflicts with another command, assign **Show ISeeYou** under **System Settings → Keyboard → Keyboard Shortcuts → Services**. If you previously used Frame Info, quit the old app and disable its service if both shortcuts appear.
 
 The waveform is a visual cue scaled to fit. Sampling can miss brief peaks in long files. File and preview support depend on the media formats macOS can read.
+
+To distribute an update, build the app with the new version in `build.sh`, zip it with `ditto -c -k --keepParent ISeeYou.app ISeeYou.zip`, and attach the ZIP to a stable GitHub release tagged with that version, such as `v1.3`.

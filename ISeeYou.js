@@ -6,10 +6,12 @@ ObjC.import('QuickLookUI');
 ObjC.bindFunction('CMFormatDescriptionGetExtension', ['id', ['id', 'id']]);
 
 const TITLE = 'ISeeYou';
+const RELEASES_URL = 'https://github.com/theoverloadstudio/ISeeYou/releases';
 const ACCENT = () => $.NSColor.systemTealColor;
 let provider, panel, files = [], reports = [], active = 0, pending = 0, currentReport;
 let previewPanel, waveformJob, waveformView;
 let statusItem;
+let updateMenuItem, updateJob;
 const codecs = {
   'lpcm':'Linear PCM','sowt':'Linear PCM','twos':'Linear PCM','in24':'Linear PCM',
   'aac ':'AAC','aach':'HE-AAC','aacp':'HE-AAC v2','alac':'Apple Lossless','flac':'FLAC',
@@ -291,7 +293,7 @@ function render() {
   currentReport=report && !report.loading ? report : undefined;
   if(!report) {
     const h=240, root=fitWindow(w,h);
-    const badge=$.NSImage.imageWithSystemSymbolNameAccessibilityDescription('waveform','Audio and video');
+    const badge=$.NSImage.imageWithSystemSymbolNameAccessibilityDescription('eye',TITLE);
     if(!badge.isNil()) {
       const v=$.NSImageView.imageViewWithImage(badge);
       v.frame=rect(29,174,37,37); v.contentTintColor=ACCENT(); root.addSubview(v);
@@ -426,10 +428,73 @@ function pasteboardPaths(p) {
   const legacy=ObjC.deepUnwrap(p.propertyListForType($.NSFilenamesPboardType));
   return Array.isArray(legacy)?legacy:[];
 }
+function versionParts(version) {
+  const match = typeof version === 'string' && /^v?(\d{1,9})(?:\.(\d{1,9}))?(?:\.(\d{1,9}))?$/.exec(version);
+  return match ? [Number(match[1]), Number(match[2] || 0), Number(match[3] || 0)] : null;
+}
+function updateResult(installed, release) {
+  if (release && release.status === 404) return 'unpublished';
+  if (!release || release.status !== 200) return 'failed';
+  const current = versionParts(installed);
+  const latest = versionParts(release.tag);
+  if (!current || !latest) return 'failed';
+  for (let i = 0; i < latest.length; i++) {
+    if (latest[i] !== current[i]) return latest[i] > current[i] ? 'available' : 'current';
+  }
+  return 'current';
+}
+function showUpdateResult(installed, release) {
+  const alert = $.NSAlert.alloc.init;
+  let releaseURL;
+  switch (updateResult(installed, release)) {
+    case 'available':
+      alert.messageText = TITLE + ' ' + release.tag.replace(/^v/, '') + ' is available';
+      alert.informativeText = 'You’re running version ' + installed + '. Open GitHub to view and download the update.';
+      releaseURL = RELEASES_URL + '/tag/' + release.tag;
+      break;
+    case 'current':
+      alert.messageText = TITLE + ' is up to date';
+      alert.informativeText = 'You’re running version ' + installed + '.';
+      break;
+    case 'unpublished':
+      alert.messageText = 'No release is available yet';
+      alert.informativeText = 'GitHub doesn’t have a published stable release of ' + TITLE + ' yet.';
+      break;
+    default:
+      alert.messageText = 'Couldn’t check for updates';
+      alert.informativeText = 'GitHub didn’t return usable release information. Try again in a moment.';
+  }
+  if (releaseURL) alert.addButtonWithTitle('View Release');
+  alert.addButtonWithTitle('OK');
+  $.NSApplication.sharedApplication.activateIgnoringOtherApps(true);
+  if (Number(alert.runModal) === 1000 && releaseURL) {
+    $.NSWorkspace.sharedWorkspace.openURL($.NSURL.URLWithString(releaseURL));
+  }
+}
+function checkForUpdates() {
+  if (updateJob) return;
+  const bundle = $.NSBundle.mainBundle;
+  const installed = str(bundle.objectForInfoDictionaryKey('CFBundleShortVersionString')) || 'unknown';
+  try {
+    const script = str(bundle.pathForResourceOfType('CheckForUpdates', 'js'));
+    const task = $.NSTask.alloc.init, pipe = $.NSPipe.pipe;
+    task.executableURL = $.NSURL.fileURLWithPath('/usr/bin/osascript');
+    task.arguments = $.NSArray.arrayWithArray(['-l', 'JavaScript', script]);
+    task.standardOutput = pipe;
+    task.standardError = $.NSFileHandle.fileHandleWithNullDevice;
+    if (!task.launchAndReturnError(null)) throw Error('Could not start update checker');
+    const timer = $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.15, provider, 'pollUpdate:', null, true);
+    updateJob = {task, pipe, timer, installed, deadline: Date.now() + 15000};
+    updateMenuItem.title = 'Checking for Updates…';
+    updateMenuItem.enabled = false;
+  } catch (_) {
+    showUpdateResult(installed, null);
+  }
+}
 function installStatusMenu(app) {
   statusItem=$.NSStatusBar.systemStatusBar.statusItemWithLength(-1);
   const button=statusItem.button;
-  const icon=$.NSImage.imageWithSystemSymbolNameAccessibilityDescription('waveform',TITLE);
+  const icon=$.NSImage.imageWithSystemSymbolNameAccessibilityDescription('eye',TITLE);
   if (icon.isNil()) {
     button.title=TITLE;
   } else {
@@ -440,11 +505,14 @@ function installStatusMenu(app) {
   button.setAccessibilityLabel(TITLE);
 
   const menu=$.NSMenu.alloc.initWithTitle(TITLE);
+  menu.autoenablesItems=false;
   const open=menu.addItemWithTitleActionKeyEquivalent('Open File…','choose:','');
   open.target=provider;
   const show=menu.addItemWithTitleActionKeyEquivalent('Show '+TITLE,'showInspector:','');
   show.target=provider;
   menu.addItem($.NSMenuItem.separatorItem);
+  updateMenuItem=menu.addItemWithTitleActionKeyEquivalent('Check for Updates…','checkForUpdates:','');
+  updateMenuItem.target=provider;
   const quit=menu.addItemWithTitleActionKeyEquivalent('Quit '+TITLE,'terminate:','');
   quit.target=app;
   statusItem.menu=menu;
@@ -499,6 +567,25 @@ function setup() {
     'showInspector:':{types:['void',['id']],implementation:function(){
       render();
       startWaveform(reports[active]);
+    }},
+    'checkForUpdates:':{types:['void',['id']],implementation:checkForUpdates},
+    'pollUpdate:':{types:['void',['id']],implementation:function(){
+      const job = updateJob;
+      if (!job || (job.task.running && Date.now() < job.deadline)) return;
+      job.timer.invalidate;
+      let release;
+      if (job.task.running) {
+        job.task.terminate;
+      } else if (Number(job.task.terminationStatus) === 0) {
+        release = get(() => {
+          const data = job.pipe.fileHandleForReading.readDataToEndOfFile;
+          return JSON.parse(str($.NSString.alloc.initWithDataEncoding(data, 4)));
+        });
+      }
+      updateJob = undefined;
+      updateMenuItem.title = 'Check for Updates…';
+      updateMenuItem.enabled = true;
+      showUpdateResult(job.installed, release);
     }},
     'reveal:':{types:['void',['id']],implementation:function(){
       const path=files[active];
