@@ -12,6 +12,8 @@ let provider, panel, files = [], reports = [], active = 0, pending = 0, currentR
 let previewPanel, waveformJob, waveformView;
 let statusItem;
 let updateMenuItem, updateJob;
+let peekToken, peekTimer, panelIsPeek=false;
+const peekRequestPath=()=>str($.NSHomeDirectory())+'/Library/Caches/com.theoverloadstudio.iseeyou/stream-deck-preview.json';
 const codecs = {
   'lpcm':'Linear PCM','sowt':'Linear PCM','twos':'Linear PCM','in24':'Linear PCM',
   'aac ':'AAC','aach':'HE-AAC','aacp':'HE-AAC v2','alac':'Apple Lossless','flac':'FLAC',
@@ -205,8 +207,16 @@ function button(parent,title,x,y,w,action,key) {
   return b;
 }
 function fitWindow(w,h) {
+  const isPeek=!!peekToken;
+  if(panel && panelIsPeek!==isPeek) {
+    panel.orderOut(null);
+    panel=undefined;
+  }
   if (!panel) {
-    panel=$.ISeeYouPanel.alloc.initWithContentRectStyleMaskBackingDefer(rect(0,0,w,h),1|2|4,2,false);
+    const style=1|2|4|(isPeek?1<<7:0); // NSWindowStyleMaskNonactivatingPanel
+    panel=$.ISeeYouPanel.alloc.initWithContentRectStyleMaskBackingDefer(rect(0,0,w,h),style,2,false);
+    panelIsPeek=isPeek;
+    panel.becomesKeyOnlyIfNeeded=isPeek;
     panel.title=TITLE;
     panel.releasedWhenClosed=false;
     panel.level=3;
@@ -223,6 +233,10 @@ function fitWindow(w,h) {
   return root;
 }
 function show() {
+  if(peekToken) {
+    panel.orderFrontRegardless;
+    return;
+  }
   panel.makeKeyAndOrderFront(null);
   $.NSApplication.sharedApplication.activateIgnoringOtherApps(true);
 }
@@ -368,13 +382,17 @@ function render() {
   root.addSubview(scroll);
   scroll.contentView.scrollToPoint($.NSMakePoint(0,Math.max(0,docH-scrollH)));
   scroll.reflectScrolledClipView(scroll.contentView);
-  line(root,26,52,518);
-  button(root,'Open File…',22,12,107,'choose:','o');
-  const preview=button(root,'Preview',182,12,96,'preview:','p');
-  preview.enabled=!!report.canPreview;
-  button(root,'Reveal in Finder',282,12,130,'reveal:');
-  const copy=button(root,'Copy Details',417,12,129,'copyReport:','c');
-  copy.enabled=!!currentReport;
+  if(peekToken) {
+    label(root,'Release the Stream Deck key to hide',26,14,518,25,{color:$.NSColor.secondaryLabelColor});
+  } else {
+    line(root,26,52,518);
+    button(root,'Open File…',22,12,107,'choose:','o');
+    const preview=button(root,'Preview',182,12,96,'preview:','p');
+    preview.enabled=!!report.canPreview;
+    button(root,'Reveal in Finder',282,12,130,'reveal:');
+    const copy=button(root,'Copy Details',417,12,129,'copyReport:','c');
+    copy.enabled=!!currentReport;
+  }
   show();
 }
 function stopWaveform() {
@@ -400,7 +418,34 @@ function startWaveform(report) {
     drawWaveform(waveformView,report);
   }
 }
-function displayPaths(paths) {
+function endPeek() {
+  if(!peekToken) return;
+  peekToken=undefined;
+  peekTimer.invalidate;
+  peekTimer=undefined;
+  pending+=1;
+  stopWaveform();
+  if(panel && panelIsPeek) panel.orderOut(null);
+}
+function readPeekRequest() {
+  return get(()=>{
+    const data=$.NSString.stringWithContentsOfFileEncodingError(peekRequestPath(),4,null);
+    const request=JSON.parse(str(data));
+    if(typeof request.token==='string' && Number.isFinite(request.expiresAt) &&
+      request.expiresAt>Date.now() && Array.isArray(request.files) &&
+      request.files.length && request.files.every(path=>typeof path==='string' && path.startsWith('/'))) return request;
+  });
+}
+function beginPeek() {
+  const request=readPeekRequest();
+  if(!request || request.token===peekToken) return;
+  endPeek();
+  peekToken=request.token;
+  peekTimer=$.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.10,provider,'pollPeek:',null,true);
+  displayPaths(request.files,true);
+}
+function displayPaths(paths, isPeek=false) {
+  if(!isPeek) endPeek();
   stopWaveform();
   if(previewPanel && previewPanel.visible) previewPanel.close;
   files=[...new Set(paths.filter(p=>typeof p==='string' && p.startsWith('/')))];
@@ -526,6 +571,9 @@ function setup() {
     'inspect:userData:error:':{types:['void',['id','id','^@']],implementation:function(p,u,e){
       try {displayPaths(pasteboardPaths(p));} catch(error){console.log(String(error));}
     }},
+    'pollPeek:':{types:['void',['id']],implementation:function(){
+      if(readPeekRequest()?.token!==peekToken) endPeek();
+    }},
     'readPending:':{types:['void',['id']],implementation:function(timer){
       if(Number(str(timer.userInfo))!==pending || !reports[active] || !reports[active].loading) return;
       reports[active]=inspect(files[active]);
@@ -565,7 +613,9 @@ function setup() {
       }
     }},
     'showInspector:':{types:['void',['id']],implementation:function(){
+      endPeek();
       render();
+      schedule();
       startWaveform(reports[active]);
     }},
     'checkForUpdates:':{types:['void',['id']],implementation:checkForUpdates},
@@ -611,11 +661,13 @@ function setup() {
 }
 function run(argv) {
   setup();
-  if(Array.isArray(argv)&&argv.length) displayPaths(argv);
+  if(Array.isArray(argv)&&argv.length) openDocuments(argv);
 }
 function openDocuments(items) {
   setup();
-  displayPaths(items.map(x=>String(x)));
+  const paths=items.map(x=>String(x));
+  if(paths.length===1 && paths[0]===peekRequestPath()) beginPeek();
+  else displayPaths(paths);
 }
-function reopen(){ setup(); render(); startWaveform(reports[active]); }
+function reopen(){ setup(); provider.showInspector(null); }
 function idle(){ setup(); return 20; }
