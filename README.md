@@ -22,8 +22,8 @@ The script uses macOS's built-in tools and ad hoc signs the resulting app. It re
 
 If the Finder shortcut is missing or conflicts with another command, assign **Show ISeeYou** under **System Settings → Keyboard → Keyboard Shortcuts → Services**. If you previously used Frame Info, quit the old app and disable its service if both shortcuts appear.
 
-Use **Hold to Inspect** in the [ISeeYou Stream Deck plugin](https://github.com/theoverloadstudio/StreamDeckPlugins/tree/main/plugins/iseeyou) to show the current Finder selection while the key is held. Finder stays active. Release the key to hide the panel. When you select several files, use the picker to switch between them.
+ISeeYou 1.5 supports protocol 2 of the [ISeeYou Stream Deck plugin](https://github.com/theoverloadstudio/StreamDeckPlugins/tree/main/plugins/iseeyou). **Toggle ISeeYou** opens or closes the inspector. **Hold to Show** temporarily shows the Finder selection and restores the previous inspector when you release the key. Finder keeps keyboard focus. If Finder has no selection, the app uses the last report or shows the empty inspector. Use the picker to switch between selected files.
 
 The waveform is a visual cue scaled to fit. Sampling can miss brief peaks in long files. File and preview support depend on the media formats macOS can read.
 
-To distribute an update, build the app with the new version in `build.sh`, zip it with `ditto -c -k --keepParent ISeeYou.app ISeeYou.zip`, and attach the ZIP to a stable GitHub release tagged with that version, such as `v1.4`.
+To distribute an update, build the app with the new version in `build.sh`, zip it with `ditto -c -k --keepParent ISeeYou.app ISeeYou.zip`, and attach the ZIP to a stable GitHub release tagged with that version, such as `v1.5`.

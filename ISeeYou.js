@@ -8,12 +8,20 @@ ObjC.bindFunction('CMFormatDescriptionGetExtension', ['id', ['id', 'id']]);
 const TITLE = 'ISeeYou';
 const RELEASES_URL = 'https://github.com/theoverloadstudio/ISeeYou/releases';
 const ACCENT = () => $.NSColor.systemTealColor;
-let provider, panel, files = [], reports = [], active = 0, pending = 0, currentReport;
+let provider, panel, pending = 0, currentReport;
 let previewPanel, waveformJob, waveformView;
 let statusItem;
 let updateMenuItem, updateJob;
-let peekToken, peekTimer, panelIsPeek=false;
-const peekRequestPath=()=>str($.NSHomeDirectory())+'/Library/Caches/com.theoverloadstudio.iseeyou/stream-deck-preview.json';
+let persistent = {files:[], reports:[], active:0};
+let persistentVisible = false, passiveInspector = false, panelIsPassive = false;
+let hold, holdTimer;
+const inspector = () => hold ? hold.inspector : persistent;
+const streamDeckDirectory = () => str($.NSHomeDirectory())+'/Library/Caches/com.theoverloadstudio.iseeyou';
+const HOLD_FILENAME = 'stream-deck-preview.json';
+const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const REQUEST_TOKEN = new RegExp('^'+UUID_PATTERN+'$', 'i');
+const TOGGLE_FILENAME = new RegExp('^stream-deck-toggle-('+UUID_PATTERN+')\\.json$', 'i');
+const consumedToggles = new Set();
 const codecs = {
   'lpcm':'Linear PCM','sowt':'Linear PCM','twos':'Linear PCM','in24':'Linear PCM',
   'aac ':'AAC','aach':'HE-AAC','aacp':'HE-AAC v2','alac':'Apple Lossless','flac':'FLAC',
@@ -207,16 +215,16 @@ function button(parent,title,x,y,w,action,key) {
   return b;
 }
 function fitWindow(w,h) {
-  const isPeek=!!peekToken;
-  if(panel && panelIsPeek!==isPeek) {
+  if(panel && panelIsPassive!==passiveInspector) {
     panel.orderOut(null);
     panel=undefined;
   }
   if (!panel) {
-    const style=1|2|4|(isPeek?1<<7:0); // NSWindowStyleMaskNonactivatingPanel
+    const style=1|2|4|(passiveInspector ? Number($.NSWindowStyleMaskNonactivatingPanel) : 0);
     panel=$.ISeeYouPanel.alloc.initWithContentRectStyleMaskBackingDefer(rect(0,0,w,h),style,2,false);
-    panelIsPeek=isPeek;
-    panel.becomesKeyOnlyIfNeeded=isPeek;
+    panelIsPassive=passiveInspector;
+    panel.becomesKeyOnlyIfNeeded=passiveInspector;
+    panel.delegate=provider;
     panel.title=TITLE;
     panel.releasedWhenClosed=false;
     panel.level=3;
@@ -233,7 +241,7 @@ function fitWindow(w,h) {
   return root;
 }
 function show() {
-  if(peekToken) {
+  if(passiveInspector) {
     panel.orderFrontRegardless;
     return;
   }
@@ -302,6 +310,7 @@ function drawWaveform(view, report) {
   view.addSubview(graph);
 }
 function render() {
+  const {files, reports, active}=inspector();
   const report=reports[active], w=570;
   waveformView=undefined;
   currentReport=report && !report.loading ? report : undefined;
@@ -317,8 +326,8 @@ function render() {
     line(root,29,145,512);
     label(root,'Select a file in Finder and press ⇧⌘E.',30,100,510,25,{size:15,weight:0.23});
     label(root,'You can also choose Finder → Services → Show ISeeYou.',30,73,510,22,{color:$.NSColor.secondaryLabelColor});
-    button(root,'Open File…',411,19,130,'choose:', 'o');
-    show(); return;
+    if(!hold) button(root,'Open File…',411,19,130,'choose:', 'o');
+    return;
   }
   const multiple=files.length>1;
   const groups=report.loading?[]:[
@@ -382,8 +391,8 @@ function render() {
   root.addSubview(scroll);
   scroll.contentView.scrollToPoint($.NSMakePoint(0,Math.max(0,docH-scrollH)));
   scroll.reflectScrolledClipView(scroll.contentView);
-  if(peekToken) {
-    label(root,'Release the Stream Deck key to hide',26,14,518,25,{color:$.NSColor.secondaryLabelColor});
+  if(hold) {
+    label(root,'Showing while the Stream Deck key is held',26,14,518,25,{color:$.NSColor.secondaryLabelColor});
   } else {
     line(root,26,52,518);
     button(root,'Open File…',22,12,107,'choose:','o');
@@ -393,7 +402,6 @@ function render() {
     const copy=button(root,'Copy Details',417,12,129,'copyReport:','c');
     copy.enabled=!!currentReport;
   }
-  show();
 }
 function stopWaveform() {
   if(!waveformJob) return;
@@ -411,52 +419,133 @@ function startWaveform(report) {
     task.standardOutput=pipe;
     task.standardError=$.NSFileHandle.fileHandleWithNullDevice;
     if (!task.launchAndReturnError(null)) throw Error('Could not start waveform reader');
-    const timer=$.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.08,provider,'pollWaveform:',null,true);
+    const timer=$.NSTimer.timerWithTimeIntervalTargetSelectorUserInfoRepeats(0.08,provider,'pollWaveform:',null,true);
+    $.NSRunLoop.mainRunLoop.addTimerForMode(timer,$.NSRunLoopCommonModes);
     waveformJob={task,pipe,timer,report,deadline:Date.now()+15000};
   } catch (_) {
     report.waveform=[];
     drawWaveform(waveformView,report);
   }
 }
-function endPeek() {
-  if(!peekToken) return;
-  peekToken=undefined;
-  peekTimer.invalidate;
-  peekTimer=undefined;
+function newInspector(paths) {
+  const files=[...new Set(paths.filter(p=>typeof p==='string' && p.startsWith('/')))];
+  const reports=files.map(path=>({path,loading:true,name:str($.NSURL.fileURLWithPath(path).lastPathComponent),groups:[]}));
+  return {files, reports, active:0};
+}
+function presentInspector(passive) {
+  passiveInspector=passive;
+  render();
+  if(hold && readHoldRequest()?.token!==hold.token) return;
+  show();
+  schedule();
+  const {reports, active}=inspector();
+  startWaveform(reports[active]);
+}
+function hideInspector() {
   pending+=1;
   stopWaveform();
-  if(panel && panelIsPeek) panel.orderOut(null);
+  if(panel) panel.orderOut(null);
 }
-function readPeekRequest() {
-  return get(()=>{
-    const data=$.NSString.stringWithContentsOfFileEncodingError(peekRequestPath(),4,null);
-    const request=JSON.parse(str(data));
-    if(typeof request.token==='string' && Number.isFinite(request.expiresAt) &&
-      request.expiresAt>Date.now() && Array.isArray(request.files) &&
-      request.files.length && request.files.every(path=>typeof path==='string' && path.startsWith('/'))) return request;
-  });
-}
-function beginPeek() {
-  const request=readPeekRequest();
-  if(!request || request.token===peekToken) return;
-  endPeek();
-  peekToken=request.token;
-  peekTimer=$.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.10,provider,'pollPeek:',null,true);
-  displayPaths(request.files,true);
-}
-function displayPaths(paths, isPeek=false) {
-  if(!isPeek) endPeek();
+function displayPaths(paths) {
+  endHold(false);
   stopWaveform();
   if(previewPanel && previewPanel.visible) previewPanel.close;
-  files=[...new Set(paths.filter(p=>typeof p==='string' && p.startsWith('/')))];
-  active=0; reports=files.map(path=>({path,loading:true,name:str($.NSURL.fileURLWithPath(path).lastPathComponent),groups:[]}));
-  render();
-  schedule();
+  persistent=newInspector(paths);
+  persistentVisible=true;
+  presentInspector(false);
 }
 function schedule() {
   pending+=1;
-  if(!files.length || !reports[active].loading) return;
-  $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.04,provider,'readPending:',pending,false);
+  const {reports, active}=inspector();
+  if(!reports[active]?.loading) return;
+  const timer=$.NSTimer.timerWithTimeIntervalTargetSelectorUserInfoRepeats(0.04,provider,'readPending:',pending,false);
+  $.NSRunLoop.mainRunLoop.addTimerForMode(timer,$.NSRunLoopCommonModes);
+}
+function streamDeckCommand(path) {
+  const slash=path.lastIndexOf('/');
+  const filename=path.slice(slash+1);
+  const toggle=/^stream-deck-toggle-.*\.json$/i.test(filename);
+  if(filename!==HOLD_FILENAME && !toggle) return null;
+  if(path.slice(0,slash)!==streamDeckDirectory()) return {kind:'invalid'};
+  if(!toggle) return {kind:'hold', path};
+  const match=TOGGLE_FILENAME.exec(filename);
+  return match ? {kind:'toggle', path, token:match[1].toLowerCase()} : {kind:'invalid'};
+}
+function readStreamDeckRequest(command) {
+  const fm=$.NSFileManager.defaultManager;
+  const directory=fm.attributesOfItemAtPathError(streamDeckDirectory(),null);
+  if(directory.isNil() || str(directory.objectForKey($.NSFileType))!==str($.NSFileTypeDirectory)) return;
+  const attrs=fm.attributesOfItemAtPathError(command.path,null);
+  if(attrs.isNil() || str(attrs.objectForKey($.NSFileType))!==str($.NSFileTypeRegular) ||
+     Number(str(attrs.objectForKey($.NSFileSize)))>1048576) return;
+  const raw=$.NSString.stringWithContentsOfFileEncodingError(command.path,4,null);
+  const request=get(()=>JSON.parse(str(raw)));
+  if(!request || typeof request.token!=='string' || !REQUEST_TOKEN.test(request.token) ||
+     !Number.isSafeInteger(request.expiresAt) || request.expiresAt<=Date.now() ||
+     !Array.isArray(request.files) ||
+     !request.files.every(path=>typeof path==='string' && path.startsWith('/') && !path.includes('\0'))) return;
+  const token=request.token.toLowerCase();
+  if(command.token && command.token!==token) return;
+  const modified=Number(attrs.objectForKey($.NSFileModificationDate).timeIntervalSince1970);
+  return {...request, token, modified};
+}
+function handleToggles(commands) {
+  // LaunchServices can batch or reorder callbacks. The producer writes one file per
+  // press in order, so drain queued files in their publication order.
+  if(!commands.some(command=>readStreamDeckRequest(command))) return;
+  const fm=$.NSFileManager.defaultManager;
+  const directory=streamDeckDirectory();
+  const names=fm.contentsOfDirectoryAtPathError(directory,null);
+  if(names.isNil()) return;
+  const queue=ObjC.deepUnwrap(names).map(name=>streamDeckCommand(directory+'/'+name))
+    .filter(command=>command?.kind==='toggle')
+    .map(command=>({command, request:readStreamDeckRequest(command)}))
+    .filter(item=>item.request)
+    .sort((a,b)=>a.request.modified-b.request.modified || a.request.expiresAt-b.request.expiresAt);
+  let changed=false;
+  for(const {command,request} of queue) {
+    // Consume before applying the press so a failed removal cannot replay it.
+    if(request.expiresAt<=Date.now() || !fm.removeItemAtPathError(command.path,null)) continue;
+    if(consumedToggles.has(request.token)) continue;
+    consumedToggles.add(request.token);
+    persistentVisible=!persistentVisible;
+    changed=true;
+    if(persistentVisible && request.files.length) persistent=newInspector(request.files);
+  }
+  if(!changed || hold) return;
+  stopWaveform();
+  if(previewPanel && previewPanel.visible) previewPanel.close;
+  if(persistentVisible) presentInspector(true);
+  else hideInspector();
+}
+function endHold(restore) {
+  if(!hold) return;
+  hold=undefined;
+  holdTimer.invalidate;
+  holdTimer=undefined;
+  hideInspector();
+  if(restore && persistentVisible) presentInspector(true);
+}
+function readHoldRequest() {
+  return readStreamDeckRequest({kind:'hold', path:streamDeckDirectory()+'/'+HOLD_FILENAME});
+}
+function syncHold() {
+  const request=readHoldRequest();
+  if(!request) {
+    endHold(true);
+    return;
+  }
+  if(hold?.token===request.token) return;
+  stopWaveform();
+  if(previewPanel && previewPanel.visible) previewPanel.close;
+  const state=request.files.length ? newInspector(request.files) :
+    {...persistent, reports:persistent.reports.slice()};
+  hold={token:request.token, inspector:state};
+  if(!holdTimer) {
+    holdTimer=$.NSTimer.timerWithTimeIntervalTargetSelectorUserInfoRepeats(0.1,provider,'pollHold:',null,true);
+    $.NSRunLoop.mainRunLoop.addTimerForMode(holdTimer,$.NSRunLoopCommonModes);
+  }
+  presentInspector(true);
 }
 function textReport(r) {
   const lines=[r.name,[r.container,r.size].filter(Boolean).join(' · ')];
@@ -571,13 +660,22 @@ function setup() {
     'inspect:userData:error:':{types:['void',['id','id','^@']],implementation:function(p,u,e){
       try {displayPaths(pasteboardPaths(p));} catch(error){console.log(String(error));}
     }},
-    'pollPeek:':{types:['void',['id']],implementation:function(){
-      if(readPeekRequest()?.token!==peekToken) endPeek();
+    'pollHold:':{types:['void',['id']],implementation:syncHold},
+    'windowWillClose:':{types:['void',['id']],implementation:function(notification){
+      if(!panel || !notification.object.isEqual(panel)) return;
+      panel=undefined;
+      if(hold) {
+        endHold(true);
+      } else {
+        persistentVisible=false;
+        hideInspector();
+      }
     }},
     'readPending:':{types:['void',['id']],implementation:function(timer){
+      const {files,reports,active}=inspector();
       if(Number(str(timer.userInfo))!==pending || !reports[active] || !reports[active].loading) return;
       reports[active]=inspect(files[active]);
-      if(panel.visible) { render(); startWaveform(reports[active]); }
+      if(panel && panel.visible) { render(); startWaveform(reports[active]); }
     }},
     'pollWaveform:':{types:['void',['id']],implementation:function(){
       const job=waveformJob;
@@ -590,15 +688,17 @@ function setup() {
       }
       stopWaveform();
       job.report.waveform=peaks;
-      if(reports[active]===job.report && waveformView && panel.visible) drawWaveform(waveformView,job.report);
+      const {reports,active}=inspector();
+      if(reports[active]===job.report && waveformView && panel && panel.visible) drawWaveform(waveformView,job.report);
     }},
     'selectFile:':{types:['void',['id']],implementation:function(sender){
       stopWaveform();
       if(previewPanel && previewPanel.visible) previewPanel.close;
-      active=Number(sender.indexOfSelectedItem);
+      const state=inspector();
+      state.active=Number(sender.indexOfSelectedItem);
       render();
       schedule();
-      startWaveform(reports[active]);
+      startWaveform(state.reports[state.active]);
     }},
     'choose:':{types:['void',['id']],implementation:function(){
       $.NSApplication.sharedApplication.activateIgnoringOtherApps(true);
@@ -613,10 +713,9 @@ function setup() {
       }
     }},
     'showInspector:':{types:['void',['id']],implementation:function(){
-      endPeek();
-      render();
-      schedule();
-      startWaveform(reports[active]);
+      endHold(false);
+      persistentVisible=true;
+      presentInspector(false);
     }},
     'checkForUpdates:':{types:['void',['id']],implementation:checkForUpdates},
     'pollUpdate:':{types:['void',['id']],implementation:function(){
@@ -638,6 +737,7 @@ function setup() {
       showUpdateResult(job.installed, release);
     }},
     'reveal:':{types:['void',['id']],implementation:function(){
+      const {files,active}=inspector();
       const path=files[active];
       if(path) $.NSWorkspace.sharedWorkspace.activateFileViewerSelectingURLs($.NSArray.arrayWithObject($.NSURL.fileURLWithPath(path)));
     }},
@@ -665,9 +765,18 @@ function run(argv) {
 }
 function openDocuments(items) {
   setup();
-  const paths=items.map(x=>String(x));
-  if(paths.length===1 && paths[0]===peekRequestPath()) beginPeek();
-  else displayPaths(paths);
+  const files=[], toggles=[];
+  let holdNotification=false;
+  for(const item of items) {
+    const path=String(item);
+    const command=streamDeckCommand(path);
+    if(!command) files.push(path);
+    else if(command.kind==='toggle') toggles.push(command);
+    else if(command.kind==='hold') holdNotification=true;
+  }
+  if(toggles.length) handleToggles(toggles);
+  if(holdNotification) syncHold();
+  if(files.length) displayPaths(files);
 }
 function reopen(){ setup(); provider.showInspector(null); }
 function idle(){ setup(); return 20; }
